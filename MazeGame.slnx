@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="MazeGame.App/MazeGame.App.csproj" />
+  <Project Path="MazeGame.Core/MazeGame.Core.csproj" />
+</Solution>
