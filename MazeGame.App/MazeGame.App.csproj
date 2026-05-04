@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MazeGame.Core\MazeGame.Core.csproj" />
+    <ProjectReference Include="..\MazeGame.Data\MazeGame.Data.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

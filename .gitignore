@@ -480,3 +480,8 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# SQLite database file created by EF Core's EnsureCreated() at runtime
+mazegame.db
+mazegame.db-shm
+mazegame.db-wal

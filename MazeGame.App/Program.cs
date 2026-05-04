@@ -1,139 +1,245 @@
 // Program.cs — Entry point for the Maze Game application.
-// Demonstrates: [#18] Events/lambdas (subscribing to engine events),
-//               [#20] Null-conditional operators.
-// Contains the main game loop: Input → Update → Render.
+// ND1: [#18] events / lambdas, [#20] null-conditional.
+// ND2: [ND2 #4] uses ConsoleKey.IsMovementKey, [ND2 #6] try/catch around DB init,
+//      [ND2 #10] uses extension Deconstruct on a saved HighScore (via Enemy elsewhere
+//      and on the most-recent score below — see usage), [ND2 #12] subscribes to
+//      OnEnemyDefeated, [ND2 #13] LINQ on saved scores, [ND2 #14] EF Core SQLite.
 
 using MazeGame.App.Rendering;
 using MazeGame.Core.Enums;
+using MazeGame.Core.Exceptions;
 using MazeGame.Core.Services;
+using MazeGame.Data;
+using MazeGame.Data.Entities;
 
-// ---------------------------------------------------------------
-// Initialize the game engine and renderer
-// ---------------------------------------------------------------
-
-// Create the renderer that handles all console output
 var renderer = new Renderer();
-
-// Create the game engine that manages all game logic
 var engine = new GameEngine();
 
-// Track whether the game should keep running
+// ---------------------------------------------------------------
+// [ND2 #14] Database initialization with EF Core + SQLite.
+// [ND2 #6] Wrapped in try/catch — if the DB is unavailable, the
+// game still runs but the high-score features are disabled.
+// ---------------------------------------------------------------
+HighScoreRepository? highScoreRepo = null;
+try
+{
+    var dbContext = new GameDbContext();
+    dbContext.Database.EnsureCreated();
+    highScoreRepo = new HighScoreRepository(dbContext);
+}
+catch (Exception ex)
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine($"Warning: high-score database unavailable ({ex.Message}). Continuing without persistence.");
+    Console.ForegroundColor = ConsoleColor.Gray;
+    Thread.Sleep(1500);
+}
+
 bool running = true;
 
-// Track whether we need to redraw the screen after a state change
-bool needsFullRedraw = false;
+// Counts enemies the player defeats during a single run (reset on StartGame).
+int enemiesDefeatedThisRun = 0;
 
 // ---------------------------------------------------------------
-// [#18] Event subscriptions — using lambdas to wire up callbacks
+// [#18] Event subscriptions
 // ---------------------------------------------------------------
 
-// When a level is completed, reset the renderer for the new level layout
 engine.OnLevelComplete += () =>
 {
     renderer.Reset();
-    needsFullRedraw = true;
 };
 
-// When the player dies, switch to the Game Over screen
 engine.OnGameOver += () =>
 {
     renderer.DrawGameOver(engine.CurrentLevel);
 };
 
-// When the player wins, switch to the Victory screen
 engine.OnVictory += () =>
 {
     renderer.DrawVictory();
 };
 
-// ---------------------------------------------------------------
-// Show the main menu and wait for the player to start
-// ---------------------------------------------------------------
+// [ND2 #12] Track kills via the new event from the engine.
+engine.OnEnemyDefeated += _ => enemiesDefeatedThisRun++;
 
 renderer.Initialize();
-renderer.DrawMainMenu();
-
-// Wait for any key press to start the game
-Console.ReadKey(true);
-
-// Start the game from level 1
-engine.StartGame();
-renderer.Reset();
 
 // ---------------------------------------------------------------
-// Main game loop: Input → Update → Render
+// Main menu loop — handles "start", "view scores", "quit".
 // ---------------------------------------------------------------
-
 while (running)
 {
-    // --- INPUT PHASE ---
-    // Check if the player pressed a key (non-blocking)
-    if (Console.KeyAvailable)
+    renderer.DrawMainMenu();
+    var menuKey = Console.ReadKey(true).Key;
+
+    if (menuKey == ConsoleKey.Q)
     {
-        var keyInfo = Console.ReadKey(true);
-        ConsoleKey key = keyInfo.Key;
-
-        // Handle global keys that work in any state
-        if (key == ConsoleKey.Q)
-        {
-            // Quit the game
-            running = false;
-            continue;
-        }
-
-        // Handle state-specific input
-        switch (engine.State)
-        {
-            case GameState.Playing:
-                // Forward gameplay keys to the engine
-                engine.ProcessInput(key);
-                break;
-
-            case GameState.GameOver:
-            case GameState.Victory:
-                // R restarts the game from level 1
-                if (key == ConsoleKey.R)
-                {
-                    engine.StartGame();
-                    renderer.Reset();
-                    needsFullRedraw = true;
-                }
-                break;
-        }
+        running = false;
+        break;
     }
 
-    // --- UPDATE PHASE ---
-    if (engine.State == GameState.Playing)
+    if (menuKey == ConsoleKey.H)
     {
-        // Update all game entities (enemy AI, cleanup, etc.)
-        engine.Update();
+        await ShowHighScoresAsync();
+        continue;
     }
 
-    // --- RENDER PHASE ---
-    if (engine.State == GameState.Playing)
+    // Default: any other key (Enter, Spacebar, etc.) starts a new run.
+    enemiesDefeatedThisRun = 0;
+    engine.StartGame();
+    renderer.Reset();
+
+    await PlayUntilEndAsync();
+
+    // After the run ends (game over OR victory), prompt to save.
+    if (engine.State is GameState.GameOver or GameState.Victory)
     {
-        // [#20] Null-conditional — safely access World and Player
-        if (engine.World?.Player != null)
-        {
-            renderer.Draw(engine.World, engine);
-        }
-    }
-    else if (needsFullRedraw)
-    {
-        // After a state change, let the next frame handle drawing
-        needsFullRedraw = false;
+        await PromptAndSaveScoreAsync(engine.State == GameState.Victory);
     }
 
-    // Cap the frame rate at roughly 15 FPS to avoid burning CPU
-    // and to keep the game at a playable speed
-    Thread.Sleep(66);
+    // Wait for R (restart → returns to main menu) or Q (quit).
+    while (true)
+    {
+        if (!Console.KeyAvailable) { Thread.Sleep(40); continue; }
+        var k = Console.ReadKey(true).Key;
+        if (k == ConsoleKey.Q) { running = false; break; }
+        if (k == ConsoleKey.R) { break; }
+    }
 }
-
-// ---------------------------------------------------------------
-// Cleanup — restore the console to a normal state
-// ---------------------------------------------------------------
 
 Console.Clear();
 Console.CursorVisible = true;
 Console.ForegroundColor = ConsoleColor.Gray;
 Console.WriteLine("Thanks for playing Maze Game!");
+return;
+
+// ---------------------------------------------------------------
+// Local functions
+// ---------------------------------------------------------------
+
+async Task PlayUntilEndAsync()
+{
+    while (engine.State == GameState.Playing)
+    {
+        if (Console.KeyAvailable)
+        {
+            var keyInfo = Console.ReadKey(true);
+            ConsoleKey key = keyInfo.Key;
+
+            if (key == ConsoleKey.Q)
+            {
+                running = false;
+                return;
+            }
+
+            // [ND2 #4] IsMovementKey extension is used inside ProcessInput.
+            engine.ProcessInput(key);
+        }
+
+        engine.Update();
+
+        // [#20] Null-conditional — safely access World and Player.
+        if (engine.World?.Player != null)
+        {
+            renderer.Draw(engine.World, engine);
+        }
+
+        Thread.Sleep(66);
+    }
+
+    // Drain any final frame so the user sees the game-over screen below.
+    await Task.CompletedTask;
+}
+
+async Task ShowHighScoresAsync()
+{
+    List<HighScore> scores;
+    if (highScoreRepo == null)
+    {
+        scores = new List<HighScore>();
+    }
+    else
+    {
+        try
+        {
+            scores = await highScoreRepo.GetTopScoresAsync(10);
+        }
+        catch (DatabaseException)
+        {
+            scores = new List<HighScore>();
+        }
+    }
+
+    renderer.DrawHighScores(scores);
+    Console.ReadKey(true);
+}
+
+async Task PromptAndSaveScoreAsync(bool victory)
+{
+    if (engine.World?.Player == null) return;
+
+    var player = engine.World.Player;
+
+    string headline = victory ? "VICTORY!" : "GAME OVER";
+    string playerName;
+    try
+    {
+        playerName = renderer.PromptForName(headline);
+    }
+    catch
+    {
+        // [ND2 #6] guard against console redirection / closed stdin.
+        playerName = "Anonymous";
+    }
+
+    int score = (engine.CurrentLevel * 1000)
+              + (Math.Max(player.Health, 0) * 10)
+              + (enemiesDefeatedThisRun * 50);
+
+    var record = new HighScore
+    {
+        PlayerName = playerName,
+        LevelReached = engine.CurrentLevel,
+        Score = score,
+        AchievedAt = DateTime.UtcNow,
+        Victory = victory,
+    };
+
+    if (highScoreRepo != null)
+    {
+        try
+        {
+            await highScoreRepo.SaveScoreAsync(record);
+            engine.NotifyHighScoreSaved(record.Score);
+
+            // [ND2 #13] LINQ on the saved leaderboard for a quick comparison.
+            var top = await highScoreRepo.GetTopScoresAsync(10);
+            int rank = top.FindIndex(s => s.Id == record.Id) + 1;
+            string note = rank > 0 && rank <= 10
+                ? $"Saved! You ranked #{rank} on the leaderboard."
+                : "Saved!";
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine();
+            Console.WriteLine("  " + note);
+            Console.ForegroundColor = ConsoleColor.Gray;
+            Console.WriteLine("  Press R to return to the menu, or Q to quit.");
+        }
+        catch (DatabaseException ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine();
+            Console.WriteLine($"  Could not save score: {ex.Message}");
+            Console.ForegroundColor = ConsoleColor.Gray;
+            Console.WriteLine("  Press R to return to the menu, or Q to quit.");
+        }
+    }
+    else
+    {
+        Console.ForegroundColor = ConsoleColor.DarkYellow;
+        Console.WriteLine();
+        Console.WriteLine("  (Score not saved — database unavailable.)");
+        Console.ForegroundColor = ConsoleColor.Gray;
+        Console.WriteLine("  Press R to return to the menu, or Q to quit.");
+    }
+}

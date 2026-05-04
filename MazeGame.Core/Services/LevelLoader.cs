@@ -1,7 +1,8 @@
-// LevelLoader.cs — Loads and parses hardcoded level templates into GameWorld instances.
-// Demonstrates: [#10] Static constructor, [#6] Range type (..), [#15] Default and named arguments.
-// Contains 3 levels of increasing difficulty with hardcoded ASCII map layouts.
+// LevelLoader.cs — Parses hardcoded ASCII level templates into GameWorld instances.
+// ND1: [#10] static constructor, [#6] Range type, [#15] default/named arguments.
+// ND2: [ND2 #5] throws InvalidLevelException, [ND2 #6] try/catch wraps parse errors.
 
+using MazeGame.Core.Exceptions;
 using MazeGame.Core.Models;
 
 namespace MazeGame.Core.Services;
@@ -109,116 +110,106 @@ public class LevelLoader
     public GameWorld LoadLevel(int levelNumber, int enemyHealth = 50, int enemyAttack = 10,
                                string bossName = "Guardian", int bossHealth = 150)
     {
-        // Fall back to level 1 if the requested level doesn't exist
+        // [ND2 #5] No silent fallback — surface bad input as an explicit exception.
         if (!LevelTemplates.ContainsKey(levelNumber))
         {
-            levelNumber = 1;
+            throw new InvalidLevelException(levelNumber, $"Level {levelNumber} does not exist.");
         }
 
         string[] template = LevelTemplates[levelNumber];
 
-        // ---------------------------------------------------------------
-        // [#6] Range type (..) — extract a portion of the template
-        // ---------------------------------------------------------------
-        // Use Range syntax to get the playable rows (skip first and last wall rows)
-        // This demonstrates the Range type even though we process the full template below
+        // [#6] Range type — playable rows (skip outer wall rows).
         string[] innerRows = template[1..^1];
-        int innerRowCount = innerRows.Length;
+        _ = innerRows.Length;
 
-        // Determine map dimensions from the template
         int height = template.Length;
         int width = template[0].Length;
 
-        // Create the game world with the correct dimensions
         GameWorld world = new GameWorld(width, height);
 
-        // Enemy names cycle through this list for variety
         string[] enemyNames = ["Goblin", "Skeleton", "Slime", "Bat", "Zombie"];
         int enemyIndex = 0;
 
-        // Parse the template character by character to populate the world
-        for (int y = 0; y < height; y++)
+        // [ND2 #6] Wrap parsing in try/catch so any malformed template is
+        // reported as a domain-specific InvalidLevelException, not a raw IndexOutOfRange.
+        try
         {
-            for (int x = 0; x < template[y].Length; x++)
+            for (int y = 0; y < height; y++)
             {
-                char c = template[y][x];
-                Position pos = new Position(x, y);
-
-                // Decide what to place based on the template character
-                switch (c)
+                for (int x = 0; x < template[y].Length; x++)
                 {
-                    case '#':
-                        // Wall tile — not walkable
-                        world.TileGrid[x, y] = '#';
-                        break;
+                    char c = template[y][x];
+                    Position pos = new Position(x, y);
 
-                    case '@':
-                        // Player spawn point — place floor and create the player
-                        world.TileGrid[x, y] = '.';
-                        world.Player = new Player(pos) { Level = levelNumber };
-                        break;
+                    switch (c)
+                    {
+                        case '#':
+                            world.TileGrid[x, y] = '#';
+                            break;
 
-                    case 'E':
-                        // Enemy spawn point — place floor and create an enemy
-                        world.TileGrid[x, y] = '.';
-                        string name = enemyNames[enemyIndex % enemyNames.Length];
-                        // Scale enemy difficulty with the level number
-                        world.Enemies.Add(new Enemy(
-                            pos,
-                            name: name,
-                            health: enemyHealth + (levelNumber - 1) * 15,
-                            attackPower: enemyAttack + (levelNumber - 1) * 3,
-                            detectionRange: 4 + levelNumber,
-                            difficulty: levelNumber * 2 + enemyIndex
-                        ));
-                        enemyIndex++;
-                        break;
+                        case '@':
+                            world.TileGrid[x, y] = '.';
+                            world.Player = new Player(pos) { Level = levelNumber };
+                            break;
 
-                    case 'B':
-                        // Boss spawn point — place floor and create a boss enemy
-                        world.TileGrid[x, y] = '.';
-                        world.Enemies.Add(new BossEnemy(
-                            pos,
-                            name: bossName,
-                            health: bossHealth,
-                            attackPower: enemyAttack + 15
-                        ));
-                        break;
+                        case 'E':
+                            world.TileGrid[x, y] = '.';
+                            string name = enemyNames[enemyIndex % enemyNames.Length];
+                            // Stats scale with level number.
+                            world.Enemies.Add(new Enemy(
+                                pos,
+                                name: name,
+                                health: enemyHealth + (levelNumber - 1) * 15,
+                                attackPower: enemyAttack + (levelNumber - 1) * 3,
+                                detectionRange: 4 + levelNumber,
+                                difficulty: levelNumber * 2 + enemyIndex
+                            ));
+                            enemyIndex++;
+                            break;
 
-                    case 'K':
-                        // Key spawn point — place floor and create a key item
-                        world.TileGrid[x, y] = '.';
-                        world.Items.Add(new Key(pos));
-                        break;
+                        case 'B':
+                            world.TileGrid[x, y] = '.';
+                            world.Enemies.Add(new BossEnemy(
+                                pos,
+                                name: bossName,
+                                health: bossHealth,
+                                attackPower: enemyAttack + 15
+                            ));
+                            break;
 
-                    case 'D':
-                        // Door spawn point — place the door character and create a door object
-                        world.TileGrid[x, y] = '.';
-                        world.Items.Add(new Door(pos));
-                        break;
+                        case 'K':
+                            world.TileGrid[x, y] = '.';
+                            world.Items.Add(new Key(pos));
+                            break;
 
-                    case '+':
-                        // Potion spawn point — place floor and create a potion
-                        world.TileGrid[x, y] = '.';
-                        // Later levels get stronger potions
-                        int healAmount = 20 + levelNumber * 5;
-                        world.Items.Add(new Potion(pos, healAmount));
-                        break;
+                        case 'D':
+                            world.TileGrid[x, y] = '.';
+                            world.Items.Add(new Door(pos));
+                            break;
 
-                    default:
-                        // Floor tile or any other character
-                        world.TileGrid[x, y] = '.';
-                        break;
+                        case '+':
+                            world.TileGrid[x, y] = '.';
+                            int healAmount = 20 + levelNumber * 5;
+                            world.Items.Add(new Potion(pos, healAmount));
+                            break;
+
+                        default:
+                            world.TileGrid[x, y] = '.';
+                            break;
+                    }
                 }
             }
         }
+        catch (Exception ex) when (ex is not InvalidLevelException)
+        {
+            // [ND2 #6] Wrap any low-level parsing fault as InvalidLevelException
+            // so the caller has one stable exception type to catch.
+            throw new InvalidLevelException(levelNumber,
+                $"Failed to parse template for level {levelNumber}.", ex);
+        }
 
-        // Initialize the tile flags based on the loaded map
         world.UpdateFlags();
-
-        // Log a level-start message
         world.AddMessages($"--- Level {levelNumber} ---", "Find the key (K) and reach the door (D)!");
-
         return world;
     }
 

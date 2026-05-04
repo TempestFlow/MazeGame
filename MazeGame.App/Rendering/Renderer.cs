@@ -1,11 +1,12 @@
-// Renderer.cs — Handles all console output: maze rendering, HUD, and messages.
-// Demonstrates: [#20] Null-coalescing assignment (??=).
-// Uses Console.SetCursorPosition for flicker-free partial redraws — only
-// characters that changed since the last frame are written to the console.
+// Renderer.cs — Console renderer: map, HUD, message log, menus, leaderboard.
+// ND1: [#20] null-coalescing assignment (??=) for lazy buffer init.
+// ND2: leaderboard rendering uses [ND2 #4] string.Truncate extension.
 
 using MazeGame.Core.Enums;
 using MazeGame.Core.Models;
 using MazeGame.Core.Services;
+using MazeGame.Core.Utils;
+using MazeGame.Data.Entities;
 
 namespace MazeGame.App.Rendering;
 
@@ -38,20 +39,15 @@ public class Renderer
     private string[] _previousHudLines = Array.Empty<string>();
 
     /// <summary>
-    /// Initializes the console for game rendering.
-    /// Hides the cursor, sets the window title, and ensures the console
-    /// buffer is large enough for the game content.
+    /// Hides the cursor, sets the title, ensures the console buffer is at
+    /// least 80×35 (large enough for the biggest level + HUD + messages
+    /// + menu content), then clears the screen.
     /// </summary>
     public void Initialize()
     {
         Console.CursorVisible = false;
         Console.Title = "Maze Game — Zelda-style Dungeon Crawler";
-
-        // Ensure the console buffer is tall enough for the largest level (15 rows)
-        // plus HUD (5 lines) plus messages (5 lines) plus menu content (~25 rows)
         EnsureBufferSize(80, 35);
-
-        // Clear the console to start fresh
         Console.Clear();
     }
 
@@ -62,29 +58,22 @@ public class Renderer
     /// </summary>
     private static void EnsureBufferSize(int minWidth, int minHeight)
     {
-        // Buffer and window resizing is only supported on Windows
+        // Buffer/window resizing only works on Windows; other terminals just scroll.
         if (!OperatingSystem.IsWindows()) return;
 
         try
         {
-            // Only resize if the current buffer is too small
-            if (Console.BufferWidth < minWidth)
-                Console.BufferWidth = minWidth;
-            if (Console.BufferHeight < minHeight)
-                Console.BufferHeight = minHeight;
+            if (Console.BufferWidth < minWidth) Console.BufferWidth = minWidth;
+            if (Console.BufferHeight < minHeight) Console.BufferHeight = minHeight;
 
-            // Also try to resize the window so the user can see everything
             int windowWidth = Math.Min(minWidth, Console.LargestWindowWidth);
             int windowHeight = Math.Min(minHeight, Console.LargestWindowHeight);
-            if (Console.WindowWidth < windowWidth)
-                Console.WindowWidth = windowWidth;
-            if (Console.WindowHeight < windowHeight)
-                Console.WindowHeight = windowHeight;
+            if (Console.WindowWidth < windowWidth) Console.WindowWidth = windowWidth;
+            if (Console.WindowHeight < windowHeight) Console.WindowHeight = windowHeight;
         }
         catch
         {
-            // Some terminals don't support buffer resizing — that's OK,
-            // the game will still work, just may scroll
+            // Resize unsupported — game still runs, console may scroll.
         }
     }
 
@@ -94,14 +83,8 @@ public class Renderer
     /// </summary>
     private static void SafeSetCursorPosition(int left, int top)
     {
-        try
-        {
-            Console.SetCursorPosition(left, top);
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            // Position is outside the console buffer — skip this write
-        }
+        try { Console.SetCursorPosition(left, top); }
+        catch (ArgumentOutOfRangeException) { /* off-screen — drop the write */ }
     }
 
     /// <summary>
@@ -112,20 +95,19 @@ public class Renderer
     /// <param name="engine">The game engine (for attack visuals and level info).</param>
     public void Draw(GameWorld? world, GameEngine engine)
     {
-        // [#20] Null-conditional — safely handle null world
+        // [#20] null-conditional
         if (world?.Player == null) return;
 
         int width = world.Width;
         int height = world.Height;
 
-        // Ensure console buffer is tall enough for map + HUD + messages
         EnsureBufferSize(width + 1, height + 12);
 
-        // [#20] ??= — lazily initialize the frame buffers on first call
+        // [#20] ??= — lazy buffer init on first call.
         _previousFrame ??= new char[width, height];
         _previousColors ??= new ConsoleColor[width, height];
 
-        // If the map size changed (new level), reset buffers and clear screen
+        // Map size changed (new level) → reset buffers + clear screen.
         if (width != _lastWidth || height != _lastHeight)
         {
             _previousFrame = new char[width, height];
@@ -135,13 +117,8 @@ public class Renderer
             Console.Clear();
         }
 
-        // Build the current frame from the tile grid and overlay entities
         DrawMap(world, engine, width, height);
-
-        // Draw the HUD below the map
         DrawHud(world.Player, engine.CurrentLevel, height, world);
-
-        // Draw the message log below the HUD
         DrawMessages(world, height);
     }
 
@@ -155,35 +132,29 @@ public class Renderer
         {
             for (int x = 0; x < width; x++)
             {
-                // Start with the base tile character
                 char displayChar = world.TileGrid[x, y];
                 ConsoleColor color = ConsoleColor.DarkGray;
 
                 Position pos = new Position(x, y);
 
-                // Layer entities on top of the tile (priority order: player > sword > enemy > items)
+                // Render priority: player > sword > enemy > items > tile.
                 if (world.Player.Position == pos)
                 {
-                    // Player character
                     displayChar = world.Player.Render();
                     color = ConsoleColor.Green;
                 }
                 else if (engine.IsAttacking && engine.AttackPosition == pos)
                 {
-                    // Sword attack visual
                     displayChar = CombatService.GetSwordSymbol(world.Player.Facing);
                     color = ConsoleColor.White;
                 }
                 else if (world.TryGetEnemyAt(pos, out var enemy))
                 {
-                    // Enemy character
                     displayChar = enemy!.Render();
-                    // [#20] Null-conditional — safely check boss status
                     color = enemy?.IsBoss == true ? ConsoleColor.Magenta : ConsoleColor.Red;
                 }
                 else
                 {
-                    // Check for items at this position
                     foreach (var item in world.Items)
                     {
                         if (item.IsActive && item.Position == pos)
@@ -194,25 +165,16 @@ public class Renderer
                         }
                     }
 
-                    // Color walls differently from floors
-                    if (displayChar == '#')
-                    {
-                        color = ConsoleColor.DarkYellow;
-                    }
-                    else if (displayChar == '.')
-                    {
-                        color = ConsoleColor.DarkGray;
-                    }
+                    if (displayChar == '#') color = ConsoleColor.DarkYellow;
+                    else if (displayChar == '.') color = ConsoleColor.DarkGray;
                 }
 
-                // Only write to console if this cell changed (diff-based rendering)
+                // Diff-based rendering — only write cells that changed.
                 if (_previousFrame![x, y] != displayChar || _previousColors![x, y] != color)
                 {
                     SafeSetCursorPosition(x, y);
                     Console.ForegroundColor = color;
                     Console.Write(displayChar);
-
-                    // Update the buffers
                     _previousFrame![x, y] = displayChar;
                     _previousColors![x, y] = color;
                 }
@@ -223,16 +185,13 @@ public class Renderer
     /// <summary>
     /// Returns the appropriate console color for an item character.
     /// </summary>
-    private static ConsoleColor GetItemColor(char symbol)
+    private static ConsoleColor GetItemColor(char symbol) => symbol switch
     {
-        return symbol switch
-        {
-            'K' => ConsoleColor.Yellow,     // Keys are yellow/gold
-            'D' => ConsoleColor.Cyan,       // Doors are cyan
-            '+' => ConsoleColor.Green,      // Potions are green
-            _   => ConsoleColor.White       // Default to white
-        };
-    }
+        'K' => ConsoleColor.Yellow,
+        'D' => ConsoleColor.Cyan,
+        '+' => ConsoleColor.Green,
+        _   => ConsoleColor.White
+    };
 
     /// <summary>
     /// Draws the HUD (heads-up display) below the map.
@@ -242,42 +201,33 @@ public class Renderer
     /// </summary>
     private void DrawHud(Player player, int level, int mapHeight, GameWorld world)
     {
-        // Build HUD lines
+        // [#4] IFormattable — "H" health-bar, "F" full status.
         string[] hudLines = new string[]
         {
-            "",  // Blank separator line
-            // [#4] IFormattable — use "H" format for health bar display
+            "",
             $"  Health: {player.ToString("H", null)}",
-            // [#4] IFormattable — use "F" format for full player details
             $"  {player.ToString("F", null)}",
             $"  Enemies remaining: {world.Enemies.Count(e => e.IsActive)}",
             ""
         };
 
-        // Only redraw HUD lines that changed
+        int padWidth = Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80;
+
         for (int i = 0; i < hudLines.Length; i++)
         {
-            int row = mapHeight + i;
-            string line = hudLines[i];
+            string paddedLine = hudLines[i].PadRight(padWidth);
 
-            // Pad the line to clear any leftover characters from previous frames
-            string paddedLine = line.PadRight(Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80);
-
-            // Check if this HUD line changed
             if (i >= _previousHudLines.Length || _previousHudLines[i] != paddedLine)
             {
-                SafeSetCursorPosition(0, row);
+                SafeSetCursorPosition(0, mapHeight + i);
                 Console.ForegroundColor = ConsoleColor.White;
                 Console.Write(paddedLine);
             }
         }
 
-        // Save for next frame comparison
         string[] padded = new string[hudLines.Length];
         for (int i = 0; i < hudLines.Length; i++)
-        {
-            padded[i] = hudLines[i].PadRight(Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80);
-        }
+            padded[i] = hudLines[i].PadRight(padWidth);
         _previousHudLines = padded;
     }
 
@@ -287,35 +237,21 @@ public class Renderer
     /// </summary>
     private void DrawMessages(GameWorld world, int mapHeight)
     {
-        // Messages start below the HUD (5 HUD lines)
         int messageStartRow = mapHeight + 5;
-
-        // Get the current messages from the world
         string[] messages = world.MessageLog.ToArray();
+        int padWidth = Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80;
 
         Console.ForegroundColor = ConsoleColor.DarkCyan;
 
-        // Draw up to 5 message lines
         for (int i = 0; i < 5; i++)
         {
             SafeSetCursorPosition(0, messageStartRow + i);
-
-            if (i < messages.Length)
-            {
-                // Pad to clear old text
-                string line = $"  {messages[i]}".PadRight(
-                    Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80);
-                Console.Write(line);
-            }
-            else
-            {
-                // Clear empty message lines
-                Console.Write(new string(' ',
-                    Console.WindowWidth > 0 ? Math.Min(Console.WindowWidth - 1, 80) : 80));
-            }
+            string line = i < messages.Length
+                ? $"  {messages[i]}".PadRight(padWidth)
+                : new string(' ', padWidth);
+            Console.Write(line);
         }
 
-        // Reset color
         Console.ForegroundColor = ConsoleColor.Gray;
     }
 
@@ -395,10 +331,92 @@ public class Renderer
 
         startRow += 2;
         Console.ForegroundColor = ConsoleColor.Yellow;
-        SafeSetCursorPosition(2, startRow);
-        Console.Write("Press any key to start...");
+        SafeSetCursorPosition(2, startRow++);
+        Console.Write("[Enter] Start game     [H] View high scores     [Q] Quit");
 
         Console.ForegroundColor = ConsoleColor.Gray;
+    }
+
+    /// <summary>
+    /// [ND2 #14] Renders the top-N leaderboard. Uses the
+    /// [ND2 #4] <c>string.Truncate</c> extension method on each name.
+    /// </summary>
+    public void DrawHighScores(List<HighScore> scores)
+    {
+        EnsureBufferSize(80, 30);
+        Console.Clear();
+
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        SafeSetCursorPosition(2, 2);
+        Console.Write("=== HIGH SCORES ===");
+
+        Console.ForegroundColor = ConsoleColor.Gray;
+        SafeSetCursorPosition(2, 4);
+        Console.Write($"{"#",-4}{"NAME",-18}{"LVL",-6}{"SCORE",-10}{"DATE",-12}{"RESULT",-10}");
+
+        if (scores.Count == 0)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            SafeSetCursorPosition(2, 6);
+            Console.Write("(no scores yet — finish a run to be the first!)");
+        }
+        else
+        {
+            for (int i = 0; i < scores.Count; i++)
+            {
+                var hs = scores[i];
+                string nameTrimmed = hs.PlayerName.Truncate(16);
+                string dateStr = hs.AchievedAt.ToLocalTime().ToString("yyyy-MM-dd");
+                string result = hs.Victory ? "Victory" : "Died";
+
+                Console.ForegroundColor = i == 0 ? ConsoleColor.Yellow
+                                        : i == 1 ? ConsoleColor.White
+                                        : i == 2 ? ConsoleColor.DarkYellow
+                                        : ConsoleColor.Gray;
+
+                SafeSetCursorPosition(2, 5 + i);
+                Console.Write($"{i + 1,-4}{nameTrimmed,-18}{hs.LevelReached,-6}{hs.Score,-10}{dateStr,-12}{result,-10}");
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Gray;
+        SafeSetCursorPosition(2, 5 + Math.Max(scores.Count, 1) + 2);
+        Console.Write("Press any key to return to the menu...");
+    }
+
+    /// <summary>
+    /// Prompts the player for a name on the game-over / victory screen.
+    /// Falls back to "Anonymous" on null/empty/whitespace input. The caller
+    /// handles the actual save via the repository.
+    /// </summary>
+    public string PromptForName(string headline)
+    {
+        Console.Clear();
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        SafeSetCursorPosition(2, 5);
+        Console.Write(headline);
+
+        Console.ForegroundColor = ConsoleColor.Gray;
+        SafeSetCursorPosition(2, 7);
+        Console.Write("Enter your name (max 16 chars), then press Enter:");
+        SafeSetCursorPosition(2, 8);
+        Console.Write("> ");
+
+        Console.CursorVisible = true;
+        string? line;
+        try
+        {
+            // [ND2 #6] try/catch — guards against null/disposed stdin.
+            line = Console.ReadLine();
+        }
+        catch
+        {
+            line = null;
+        }
+        Console.CursorVisible = false;
+
+        if (string.IsNullOrWhiteSpace(line)) return "Anonymous";
+        return line.Trim().Truncate(16);
     }
 
     /// <summary>
